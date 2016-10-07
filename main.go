@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/donovanhide/eventsource"
@@ -83,8 +84,7 @@ func pushImage(srv *eventsource.Server, channel string) error {
 			return err
 		}
 		srv.Publish([]string{channel}, imageEvent{id: time.Now().Nanosecond(), image: image})
-		log.Printf("Debug: pushInterval: %d\n", pushInterval)
-		time.Sleep(pushInterval * time.Second)
+		time.Sleep(pushInterval)
 		currentImageIndex += 1
 	}
 }
@@ -116,14 +116,23 @@ func startServer() {
 	}
 }
 
+// setPushInterval sets the interval to push next image based on the environment or the default value
+func setPushInterval() {
+	if os.Getenv(intervalEnvKey) != "" {
+		interval, err := strconv.Atoi(os.Getenv(intervalEnvKey))
+		if err != nil {
+			if err != nil {
+				log.Printf("Set interval is not valid. Using default... (%d)\n", defaultPushInterval)
+			}
+			return
+		}
+		pushInterval = time.Duration(interval) * time.Second
+	}
+}
+
 func main() {
 	var err error
-	if os.Getenv(intervalEnvKey) != "" {
-		pushInterval, err = time.ParseDuration(os.Getenv(intervalEnvKey))
-		if err != nil {
-			log.Println("Set invalid is not valid. Using default...")
-		}
-	}
+	setPushInterval()
 
 	srv := eventsource.NewServer()
 	srv.Gzip = true

@@ -1,108 +1,151 @@
 package main
 
 import (
-	"encoding/json"
+	"bufio"
+	"encoding/base64"
+	"errors"
 	"fmt"
-	"html/template"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/donovanhide/eventsource"
 )
 
 const (
-	REMOTE_HOST          = "http://xkcd1446.org"
-	LIST_JSON            = "/list.json"
-	REMOTE_IMAGES_FOLDER = "/img/"
-	LOCAL_IMAGES_FOLDER  = "./images/"
+	port                = "8080"
+	intervalEnvKey      = "XKCD1446_INTERVAL"
+	defaultPushInterval = 2
+	landing             = "landing"
+
+	imageListFile = "./images.txt"
 )
 
-var AllImages struct {
-	Images []string
+var (
+	pushInterval      time.Duration = defaultPushInterval
+	currentImageIndex               = 0
+)
+
+var allImageUrls = make(map[int]image)
+
+type image struct {
+	seqN  int
+	url   string
+	image []byte
 }
 
-func getImageNames() {
-	fmt.Println("Getting all image names...")
+type imageEvent struct {
+	id    int
+	image image
+}
 
-	resp, err := http.Get(REMOTE_HOST + LIST_JSON)
+func (ie imageEvent) Id() string    { return fmt.Sprintf("%d", ie.image.seqN) }
+func (ie imageEvent) Event() string { return "landing" }
+func (ie imageEvent) Data() string  { return base64.StdEncoding.EncodeToString(ie.image.image) }
+
+// loadImageUrls loads all the image urls from the file system
+func loadImageUrls() error {
+	file, err := os.Open(imageListFile)
 	if err != nil {
-		panic(err.Error())
+		return err
+	}
+	defer file.Close()
+
+	if _, err := file.Stat(); os.IsNotExist(err) {
+		return errors.New(imageListFile + " not found!")
+	}
+
+	curLine := 0
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		allImageUrls[curLine] = image{seqN: curLine, url: scanner.Text()}
+		curLine += 1
+	}
+
+	if curLine == 0 {
+		return errors.New(imageListFile + " is empty!")
+	}
+
+	return nil
+}
+
+// pushImage regulary pushes the next image to the server
+func pushImage(srv *eventsource.Server, channel string) error {
+	for {
+		if currentImageIndex >= len(allImageUrls)-1 {
+			currentImageIndex = 0
+		}
+
+		image, err := loadImage(currentImageIndex)
+		if err != nil {
+			return err
+		}
+		srv.Publish([]string{channel}, imageEvent{id: time.Now().Nanosecond(), image: image})
+		log.Printf("Debug: pushInterval: %d\n", pushInterval)
+		time.Sleep(pushInterval * time.Second)
+		currentImageIndex += 1
+	}
+}
+
+func loadImage(index int) (image, error) {
+	img, ok := allImageUrls[index]
+	if !ok {
+		return image{}, errors.New(fmt.Sprintf("Image does not exist on index %d", index))
+	}
+	resp, err := http.Get(img.url)
+	if err != nil {
+		return image{}, errors.New("Failed to get image from " + img.url + ". " + err.Error())
 	}
 	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
+	imageData, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		panic(err.Error())
+		return image{}, errors.New("Failed to read image from response body. " + err.Error())
 	}
 
-	err = json.Unmarshal(body, &AllImages.Images)
-	if err != nil {
-		panic(err.Error())
-	}
-
+	img.image = imageData
+	return img, nil
 }
 
-func fetchImages() {
-	fmt.Println("Fetching new images...")
-
-	for _, name := range AllImages.Images {
-		localFilePath := LOCAL_IMAGES_FOLDER + name
-		if fi, err := os.Stat(localFilePath); err == nil && fi.Size() > 0 {
-			//fmt.Printf("File %s already exists. Skipping...\n", localFilePath)
-			continue
-		}
-		imageUrl := REMOTE_HOST + REMOTE_IMAGES_FOLDER + name
-		fmt.Printf("Now fetching %s\n", imageUrl)
-		resp, err := http.Get(imageUrl)
-		if err != nil {
-			fmt.Printf("Skipping %s because of error: %s\n", name, err.Error())
-			continue
-		}
-		defer resp.Body.Close()
-
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			panic(err.Error())
-		}
-
-		ioutil.WriteFile(LOCAL_IMAGES_FOLDER+name, body, 0666)
+// starts the listener
+func startServer() {
+	err := http.ListenAndServe(":"+port, nil)
+	if err != nil {
+		log.Fatalln("Serve failed!", err)
 	}
-}
-
-func dividableBy(args ...interface{}) bool {
-	if len(args) != 2 {
-		return false
-	}
-
-	x := args[0].(int)
-	y := args[1].(int)
-
-	if x%y == 0 {
-		return true
-	}
-
-	return false
 }
 
 func main() {
-	go func() {
-		for {
-			getImageNames()
-			fetchImages()
-			time.Sleep(1 * time.Minute)
-		}
-	}()
-
-	fmt.Println("All done. Starting server at http://localhost:8080")
-
-	t := template.Must(template.New("index.html").Funcs(template.FuncMap{"dividableBy": dividableBy}).ParseFiles("index.html"))
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		err := t.Execute(w, AllImages)
+	var err error
+	if os.Getenv(intervalEnvKey) != "" {
+		pushInterval, err = time.ParseDuration(os.Getenv(intervalEnvKey))
 		if err != nil {
-			panic(err)
+			log.Println("Set invalid is not valid. Using default...")
 		}
-	})
-	http.Handle("/images/", http.FileServer(http.Dir("")))
-	http.ListenAndServe(":8080", nil)
+	}
+
+	srv := eventsource.NewServer()
+	srv.Gzip = true
+	defer srv.Close()
+
+	//	l, err := net.Listen("tcp", ":"+port)
+	//	if err != nil {
+	//		log.Fatalln("Failed to start listener on port "+port, err)
+	//	}
+	//	defer l.Close()
+	http.HandleFunc("/"+landing, srv.Handler(landing))
+	http.Handle("/", http.FileServer(http.Dir("")))
+	go startServer()
+
+	err = loadImageUrls()
+	if err != nil {
+		log.Fatalln("Failed to load list with image urls!", err.Error())
+	}
+
+	err = pushImage(srv, landing)
+	if err != nil {
+		log.Fatalln("Error while pushing new image.", err)
+
+	}
 }

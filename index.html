@@ -1,19 +1,13 @@
 <!DOCTYPE html>
 <html>
-    <head>
-        <meta charset="UTF-8" />
-        <title>XKCD 1446 gallery</title>
-    </head>
-    <body>
-        <table border="0" cellspacing="5" cellpadding="5" width="100%">
-            <tr>
-            {{ range $index, $name := .Images }}
-                {{ if dividableBy $index 3 }} 
-            </tr><tr>
-                {{ end }}
-                <td width="30%"><img width="100%" src="/images/{{ $name }}"><br/><center>{{ $name }}</center></img></td>
-            {{ end }}
-            </tr>
-        </table>
-    </body>
+	<head>
+		<meta charset="UTF-8" />
+		<title>Remember philea</title>
+	</head>
+	<body>
+		<center>
+			<div id="landing">Memories...<br/></div>
+		</center>
+		<script type="text/javascript" src="index.js"></script>
+	</body>
 </html>
